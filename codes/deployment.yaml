@@ -1,0 +1,111 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Multi-Region EC2 Deployment"
+
+Parameters:
+  ImageId:
+    Type: String
+    Description: "The AMI ID to use for launching EC2 instances"
+
+  InstanceType:
+    Type: String
+    Default: "t2.micro"
+    Description: "EC2 instance type"
+
+  KeyPair:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: "Key Pair for SSH access to instances"
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: "VPC to launch instances in"
+
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: "Subnets to launch EC2 instances"
+
+  TargetGroupArn:
+    Type: String
+    Description: "ARN of the existing ELB Target Group"
+
+Resources:
+
+  # Auto Scaling Group for us-west-2
+  AutoScalingGroupUSWest:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier: !Ref SubnetIds
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MinSize: 2
+      MaxSize: 4
+      DesiredCapacity: 2
+      TargetGroupARNs:
+        - !Ref TargetGroupArn
+      HealthCheckType: "EC2"
+      HealthCheckGracePeriod: 300
+      TerminationPolicies:
+        - "OldestInstance"
+
+  # Auto Scaling Group for eu-central-1
+  AutoScalingGroupEUCentral:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier: !Ref SubnetIds
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MinSize: 2
+      MaxSize: 4
+      DesiredCapacity: 2
+      TargetGroupARNs:
+        - !Ref TargetGroupArn
+      HealthCheckType: "EC2"
+      HealthCheckGracePeriod: 300
+      TerminationPolicies:
+        - "OldestInstance"
+
+  # Launch Template for EC2 Instances
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: "WebServerLaunchTemplate"
+      LaunchTemplateData:
+        ImageId: !Ref ImageId
+        InstanceType: !Ref InstanceType
+        KeyName: !Ref KeyPair
+        SecurityGroupIds:
+          - !Ref SecurityGroup
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            sudo apt update -y
+            sudo apt install apache2 -y
+            sudo systemctl start apache2
+            sudo systemctl enable apache2
+            echo "<h1>Deployed by CloudFormation</h1>" | sudo tee /var/www/html/index.html
+
+  # Security Group for EC2 Instances
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Enable HTTP and SSH access"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+
+Outputs:
+  AutoScalingGroupUSWest:
+    Description: "Auto Scaling Group for us-west-2"
+    Value: !Ref AutoScalingGroupUSWest
+
+  AutoScalingGroupEUCentral:
+    Description: "Auto Scaling Group for eu-central-1"
+    Value: !Ref AutoScalingGroupEUCentral

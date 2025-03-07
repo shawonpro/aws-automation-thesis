@@ -1,0 +1,122 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation Template to create a Lambda function for EC2
+  instance backup via AMI.
+
+Resources:
+  # IAM Role for Lambda
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: EC2InstanceBackupLambdaRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: EC2BackupPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:CreateImage
+                  - ec2:DescribeInstances
+                  - ec2:DescribeImages
+                  - ec2:CreateTags
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+
+  # Lambda Function
+  EC2InstanceBackupLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: EC2InstanceBackupLambda
+      Runtime: python3.8
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Handler: index.lambda_handler
+      Timeout: 30
+      Environment:
+        Variables:
+          INSTANCE_ID: i-06aa6f837cbd6f0a5 # Replace with your actual EC2 instance ID
+      Code:
+        ZipFile: |
+          import boto3
+          import datetime
+          import os
+
+          ec2_client = boto3.client('ec2')
+
+          def lambda_handler(event, context):
+              instance_id = os.getenv('INSTANCE_ID')
+
+              if not instance_id:
+                  return {"status": "error", "message": "Instance ID not provided"}
+
+              try:
+                  ami_name = f"Backup-{instance_id}-{datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}"
+                  response = ec2_client.create_image(
+                      InstanceId=instance_id,
+                      Name=ami_name,
+                      Description=f"Automated backup for instance {instance_id}",
+                      NoReboot=True,
+                      TagSpecifications=[
+                          {
+                              'ResourceType': 'image',
+                              'Tags': [
+                                  {'Key': 'Backup', 'Value': 'Daily'},
+                                  {'Key': 'InstanceId', 'Value': instance_id},
+                                  {'Key': 'CreatedBy', 'Value': 'Lambda Backup'}
+                              ]
+                          }
+                      ]
+                  )
+                  return {
+                      "status": "success",
+                      "message": f"AMI created: {response['ImageId']}",
+                      "ami_id": response['ImageId']
+                  }
+              except Exception as e:
+                  return {
+                      "status": "error",
+                      "message": str(e)
+                  }
+
+  # EventBridge Rule to Trigger Lambda (Optional - Daily Backup)
+  BackupScheduler:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: DailyEC2InstanceBackup
+      Description: Triggers the Lambda function to back up an EC2 instance daily
+      ScheduleExpression: cron(0 0 * * ? *) # Runs daily at midnight UTC
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt EC2InstanceBackupLambda.Arn
+          Id: LambdaTarget
+
+  # Grant EventBridge Permission to Invoke Lambda
+  LambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref EC2InstanceBackupLambda
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt BackupScheduler.Arn
+
+Outputs:
+  LambdaFunctionName:
+    Description: The name of the Lambda function
+    Value: !Ref EC2InstanceBackupLambda
+
+  EventBridgeRuleName:
+    Description: The name of the EventBridge rule for scheduling backups
+    Value: !Ref BackupScheduler

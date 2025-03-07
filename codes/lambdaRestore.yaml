@@ -1,0 +1,155 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: "CloudFormation Template to create a Lambda function for restoring an EC2 instance from the latest AMI backup."
+
+Resources:
+  # IAM Role for Lambda
+  LambdaRestoreExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: EC2InstanceRestoreLambdaRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: EC2RestorePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeImages
+                  - ec2:RunInstances
+                  - ec2:CreateTags
+                  - ec2:StopInstances
+                  - ec2:TerminateInstances
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+
+  # Lambda Function to Restore EC2 from AMI
+  EC2InstanceRestoreLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: "EC2InstanceRestoreLambda"
+      Runtime: python3.8
+      Role: !GetAtt LambdaRestoreExecutionRole.Arn
+      Handler: "index.lambda_handler"
+      Timeout: 60
+      Environment:
+        Variables:
+          INSTANCE_ID: "i-06aa6f837cbd6f0a5"  # Replace with actual EC2 instance ID
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+
+          ec2_client = boto3.client('ec2')
+
+          def lambda_handler(event, context):
+              instance_id = os.getenv('INSTANCE_ID')
+
+              if not instance_id:
+                  return {"status": "error", "message": "Instance ID not provided"}
+
+              try:
+                  # Check instance status
+                  response = ec2_client.describe_instances(InstanceIds=[instance_id])
+                  instance_state = response['Reservations'][0]['Instances'][0]['State']['Name']
+
+                  if instance_state != 'stopped':
+                      return {
+                          "status": "skipped",
+                          "message": f"Instance {instance_id} is not stopped, skipping restore."
+                      }
+
+                  # Find the latest AMI backup
+                  images = ec2_client.describe_images(
+                      Owners=['self'],
+                      Filters=[
+                          {'Name': 'tag:InstanceId', 'Values': [instance_id]},
+                          {'Name': 'tag:Backup', 'Values': ['Daily']}
+                      ]
+                  )
+
+                  if not images['Images']:
+                      return {"status": "error", "message": "No backup AMI found"}
+
+                  latest_ami = sorted(images['Images'], key=lambda x: x['CreationDate'], reverse=True)[0]
+                  latest_ami_id = latest_ami['ImageId']
+
+                  # Get original instance details
+                  original_instance = response['Reservations'][0]['Instances'][0]
+                  instance_type = original_instance['InstanceType']
+                  subnet_id = original_instance['SubnetId']
+                  security_groups = [sg['GroupId'] for sg in original_instance['SecurityGroups']]
+
+                  # Launch a new instance from AMI
+                  new_instance = ec2_client.run_instances(
+                      ImageId=latest_ami_id,
+                      InstanceType=instance_type,
+                      SubnetId=subnet_id,
+                      SecurityGroupIds=security_groups,
+                      MinCount=1,
+                      MaxCount=1,
+                      TagSpecifications=[
+                          {
+                              'ResourceType': 'instance',
+                              'Tags': [
+                                  {'Key': 'RestoredFrom', 'Value': latest_ami_id},
+                                  {'Key': 'CreatedBy', 'Value': 'Lambda Restore'}
+                              ]
+                          }
+                      ]
+                  )
+
+                  new_instance_id = new_instance['Instances'][0]['InstanceId']
+
+                  return {
+                      "status": "success",
+                      "message": f"Instance {new_instance_id} launched from AMI {latest_ami_id}",
+                      "new_instance_id": new_instance_id
+                  }
+
+              except Exception as e:
+                  return {"status": "error", "message": str(e)}
+
+  # EventBridge Rule to Trigger Restore Function (Runs every 6 hours)
+  RestoreScheduler:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: "EC2InstanceRestoreSchedule"
+      Description: "Triggers the Lambda function to check and restore an EC2 instance if stopped"
+      ScheduleExpression: "cron(0 */6 * * ? *)"  # Runs every 6 hours
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt EC2InstanceRestoreLambda.Arn
+          Id: "LambdaRestoreTarget"
+
+  # Grant EventBridge Permission to Invoke Lambda
+  LambdaRestorePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !Ref EC2InstanceRestoreLambda
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt RestoreScheduler.Arn
+
+Outputs:
+  RestoreLambdaFunctionName:
+    Description: "The name of the Restore Lambda function"
+    Value: !Ref EC2InstanceRestoreLambda
+
+  RestoreEventBridgeRuleName:
+    Description: "The name of the EventBridge rule for checking and restoring EC2 instance"
+    Value: !Ref RestoreScheduler

@@ -1,0 +1,121 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Setup AWS DRS for us-west-2 to eu-central-1."
+
+Parameters:
+  SourceRegion:
+    Type: String
+    Default: "us-west-2"
+    Description: "AWS region where the source EC2 instances are running."
+
+  TargetRegion:
+    Type: String
+    Default: "eu-central-1"
+    Description: "AWS region where the recovery instances will be launched."
+
+  InstanceType:
+    Type: String
+    Default: "t2.micro"
+    Description: "EC2 instance type for the recovery instances."
+
+  KeyPair:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: "Key Pair for SSH access to recovery instances."
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: "VPC ID for target region (eu-central-1)."
+
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: "Subnets in eu-central-1 for launching recovery instances."
+
+Resources:
+
+  # IAM Role for AWS DRS
+  DRSIAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AWS-DRS-Replication-Role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - drs.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: DRSReplicationPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "ec2:DescribeInstances"
+                  - "ec2:StartInstances"
+                  - "ec2:StopInstances"
+                  - "ec2:TerminateInstances"
+                  - "ec2:CreateSnapshot"
+                  - "ec2:CreateImage"
+                  - "ec2:RunInstances"
+                Resource: "*"
+
+  # Auto Scaling Group in Target Region (eu-central-1)
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier: !Ref SubnetIds
+      LaunchTemplate:
+        LaunchTemplateId: !Ref RecoveryLaunchTemplate
+        Version: !GetAtt RecoveryLaunchTemplate.LatestVersionNumber
+      MinSize: 1
+      MaxSize: 3
+      DesiredCapacity: 1
+      HealthCheckType: "EC2"
+      HealthCheckGracePeriod: 300
+
+  # Launch Template for Recovery Instances
+  RecoveryLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: "RecoveryLaunchTemplate"
+      LaunchTemplateData:
+        ImageId: "ami-"  # Replace with AMI ID created by AWS DRS
+        InstanceType: !Ref InstanceType
+        KeyName: !Ref KeyPair
+        SecurityGroupIds:
+          - !Ref SecurityGroup
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            sudo apt update -y
+            sudo apt install apache2 -y
+            sudo systemctl start apache2
+            sudo systemctl enable apache2
+            echo "<h1>Recovered Instance in eu-central-1</h1>" | sudo tee /var/www/html/index.html
+
+  # Security Group for Recovery Instances
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Allow HTTP and SSH access"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+
+Outputs:
+  AutoScalingGroupId:
+    Description: "Auto Scaling Group ID for recovery instances"
+    Value: !Ref AutoScalingGroup
+
+  IAMRoleARN:
+    Description: "IAM Role ARN for AWS DRS"
+    Value: !GetAtt DRSIAMRole.Arn

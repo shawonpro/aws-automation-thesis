@@ -1,0 +1,45 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "AWS Global Accelerator with Two Load Balancers in Different Regions"
+
+Resources:
+  ## Create AWS Global Accelerator ##
+  GlobalAccelerator:
+    Type: AWS::GlobalAccelerator::Accelerator
+    Properties:
+      Name: MyGlobalAccelerator
+      Enabled: true
+
+  ## Create Listener for Global Accelerator ##
+  GlobalAcceleratorListener:
+    Type: AWS::GlobalAccelerator::Listener
+    Properties:
+      AcceleratorArn: !Ref GlobalAccelerator
+      Protocol: TCP
+      PortRanges:
+        - FromPort: 80
+          ToPort: 80
+
+  ## Create Endpoint Group for us-west-2 ##
+  GlobalAcceleratorEndpointGroupUSWest2:
+    Type: AWS::GlobalAccelerator::EndpointGroup
+    Properties:
+      ListenerArn: !Ref GlobalAcceleratorListener
+      EndpointGroupRegion: us-west-2
+      TrafficDialPercentage: 100
+      EndpointConfigurations:
+        - EndpointId: #Loadbalancer ARN
+
+  ## Create Endpoint Group for eu-central-1 ##
+  GlobalAcceleratorEndpointGroupEUCentral1:
+    Type: AWS::GlobalAccelerator::EndpointGroup
+    Properties:
+      ListenerArn: !Ref GlobalAcceleratorListener
+      EndpointGroupRegion: eu-central-1
+      TrafficDialPercentage: 100
+      EndpointConfigurations:
+        - EndpointId: #Loadbalancer ARN
+
+Outputs:
+  GlobalAcceleratorDNS:
+    Description: "Global Accelerator DNS Name"
+    Value: !GetAtt GlobalAccelerator.DnsName
